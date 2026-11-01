@@ -1,0 +1,16 @@
+# Environnements virtuels
+.venv/
+.env/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Éditeurs / outils
+.vscode/
+.qodo/
+
+# Secrets
+.env
+*.env
