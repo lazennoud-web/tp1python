@@ -54,43 +54,45 @@ def create_table(conn):
 
 def save_rows(conn, entries):
     cursor = conn.cursor()
+    inserted = 0
+    batch_size = 500
 
-    data = []
+    for i in range(0, len(entries), batch_size):
+        batch = []
 
-    for e in entries:
-        values = (
-            e["month"],
-            e["day"],
-            e["time"],
-            e["message"],
-            e["ip"]
+        for e in entries[i:i + batch_size]:
+            values = (
+                e["month"],
+                e["day"],
+                e["time"],
+                e["message"],
+                e["ip"]
+            )
+
+            content = "|".join(
+                str(value) if value is not None else ""
+                for value in values
+            )
+
+            log_hash = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+
+            batch.append(values + (log_hash,))
+
+        cursor.executemany(
+            """
+            INSERT IGNORE INTO logs
+            (month, day, time, message, ip, log_hash)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            batch
         )
 
-        content = "|".join(
-            str(value) if value is not None else ""
-            for value in values
-        )
+        inserted += cursor.rowcount
+        conn.commit()
 
-        log_hash = hashlib.sha256(
-            content.encode("utf-8")
-        ).hexdigest()
-
-        data.append(values + (log_hash,))
-
-    cursor.executemany(
-        """
-        INSERT IGNORE INTO logs
-        (month, day, time, message, ip, log_hash)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        """,
-        data
-    )
-
-    inserted = cursor.rowcount
-
-    conn.commit()
     cursor.close()
-
     return inserted
 
 
