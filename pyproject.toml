@@ -9,4 +9,5 @@ dependencies = [
     "mysql-connector-python>=26.10.0",
     "python-dotenv>=1.2.4",
     "requests>=2.34.2",
+    "watchdog>=7.0.0",
 ]
