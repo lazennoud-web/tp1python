@@ -7,5 +7,6 @@ requires-python = ">=3.11"
 dependencies = [
     "matplotlib>=3.11.2",
     "mysql-connector-python>=26.10.0",
+    "python-dotenv>=1.2.4",
     "requests>=2.34.2",
 ]

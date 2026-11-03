@@ -1,6 +1,9 @@
 
 import re
-import sqlite3
+import os
+import hashlib
+import mysql.connector
+from dotenv import load_dotenv
 import requests
 from collections import Counter
 
@@ -11,49 +14,126 @@ from ingestion import raw
 from process import extract_transforme
 from process import geolocation
 
-DB_PATH = "logs.db"
+load_dotenv()
+
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "port": int(os.getenv("DB_PORT")),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME")
+}
+
 USER_RE = re.compile(r'Failed password for (?:invalid user )?(\S+) from')
 
 BG, CARD, TEXT = "#0f172a", "#1e293b", "#e2e8f0"
 BLUE, RED, GREEN, ORANGE, PURPLE = "#38bdf8", "#f87171", "#4ade80", "#fb923c", "#a78bfa"
 
 
-# ---------- Base de données ----------
+# ---------- Base de données MySQL ----------
+
 def create_table(conn):
-    conn.execute("""
+    cursor = conn.cursor()
+
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            month TEXT,
-            day INTEGER,
-            time TEXT,
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            month VARCHAR(20),
+            day INT,
+            time VARCHAR(20),
             message TEXT,
-            ip TEXT
+            ip VARCHAR(45),
+            log_hash CHAR(64),
+            UNIQUE KEY unique_log_hash (log_hash)
         )
     """)
 
+    conn.commit()
+    cursor.close()
+
 
 def save_rows(conn, entries):
-    conn.executemany(
-        "INSERT INTO logs (month, day, time, message, ip) VALUES (?, ?, ?, ?, ?)",
-        [(e["month"], e["day"], e["time"], e["message"], e["ip"]) for e in entries],
+    cursor = conn.cursor()
+
+    data = []
+
+    for e in entries:
+        values = (
+            e["month"],
+            e["day"],
+            e["time"],
+            e["message"],
+            e["ip"]
+        )
+
+        content = "|".join(
+            str(value) if value is not None else ""
+            for value in values
+        )
+
+        log_hash = hashlib.sha256(
+            content.encode("utf-8")
+        ).hexdigest()
+
+        data.append(values + (log_hash,))
+
+    cursor.executemany(
+        """
+        INSERT IGNORE INTO logs
+        (month, day, time, message, ip, log_hash)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        data
     )
+
+    inserted = cursor.rowcount
+
     conn.commit()
+    cursor.close()
+
+    return inserted
 
 
 def top_ips(conn, n=10):
-    return conn.execute(
-        "SELECT ip, COUNT(*) FROM logs WHERE ip IS NOT NULL "
-        "GROUP BY ip ORDER BY 2 DESC LIMIT ?", (n,)
-    ).fetchall()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT ip, COUNT(*)
+        FROM logs
+        WHERE ip IS NOT NULL
+        GROUP BY ip
+        ORDER BY 2 DESC
+        LIMIT %s
+        """,
+        (n,)
+    )
+
+    result = cursor.fetchall()
+    cursor.close()
+
+    return result
 
 
 def load_rows(conn):
-    return conn.execute(
-        "SELECT month, day, time, message, ip FROM logs ORDER BY id"
-    ).fetchall()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT month, day, time, message, ip
+        FROM logs
+        ORDER BY id
+        """
+    )
+
+    result = cursor.fetchall()
+    cursor.close()
+
+    return result
 
 
 # ---------- Statistiques ----------
+
 def classify(msg):
     if "nvalid user" in msg:
         return "Invalid user"
@@ -96,7 +176,6 @@ def compute_stats(rows):
     return s
 
 
-
 def countries_stats(top, limit=8):
     countries = Counter()
 
@@ -135,6 +214,7 @@ def countries_stats(top, limit=8):
 
 
 # ---------- Dashboard ----------
+
 def style(ax, title):
     ax.set_facecolor(CARD)
     ax.set_title(title, color=TEXT, fontsize=11, fontweight="bold", loc="left")
@@ -272,27 +352,35 @@ def show_dashboard(rows, stats, top, countries):
 
 
 # ---------- Programme principal ----------
+
 def main():
     rows = raw.toRows('./data')
 
     entries = []
+
     for row in rows:
         entry = extract_transforme.extract_from_row(row)
+
         if entry:
             entries.append(entry)
 
-    conn = sqlite3.connect(DB_PATH)
+    conn = mysql.connector.connect(**DB_CONFIG)
 
-    create_table(conn)
-    conn.execute("DELETE FROM logs")
-    save_rows(conn, entries)
+    print("Connexion à MySQL réussie !")
 
-    print(f"{len(entries)} lignes enregistrées dans {DB_PATH}")
+    try:
+        create_table(conn)
 
-    top = top_ips(conn)
-    data = load_rows(conn)
+        inserted = save_rows(conn, entries)
 
-    conn.close()
+        print(f"{inserted} nouveaux logs enregistrés dans MySQL.")
+
+        top = top_ips(conn)
+        data = load_rows(conn)
+
+    finally:
+        conn.close()
+        print("Connexion MySQL fermée.")
 
     stats = compute_stats(data)
 
