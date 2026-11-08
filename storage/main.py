@@ -2,6 +2,7 @@
 import re
 import os
 import hashlib
+import logging
 import mysql.connector
 from dotenv import load_dotenv
 import requests
@@ -14,11 +15,44 @@ from ingestion import raw
 from process import extract_transforme
 from process import geolocation
 
+
+# ---------- Configuration ----------
+
 load_dotenv()
+
+# Configuration du fichier de journalisation
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_DIR = os.path.join(PROJECT_DIR, "app_logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.ERROR)
+
+if not logger.handlers:
+    handler = logging.FileHandler(
+        os.path.join(LOG_DIR, "storage.log"),
+        encoding="utf-8"
+    )
+
+    formatter = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    )
+
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    logger.propagate = False
+
+
+# Configuration de la base de données
+try:
+    DB_PORT = int(os.getenv("DB_PORT"))
+except (TypeError, ValueError):
+    logger.exception("Configuration MySQL invalide : DB_PORT")
+    raise
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST"),
-    "port": int(os.getenv("DB_PORT")),
+    "port": DB_PORT,
     "user": os.getenv("DB_USER"),
     "password": os.getenv("DB_PASSWORD"),
     "database": os.getenv("DB_NAME")
@@ -33,105 +67,145 @@ BLUE, RED, GREEN, ORANGE, PURPLE = "#38bdf8", "#f87171", "#4ade80", "#fb923c", "
 # ---------- Base de données MySQL ----------
 
 def create_table(conn):
-    cursor = conn.cursor()
+    cursor = None
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS logs (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            month VARCHAR(20),
-            day INT,
-            time VARCHAR(20),
-            message TEXT,
-            ip VARCHAR(45),
-            log_hash CHAR(64),
-            UNIQUE KEY unique_log_hash (log_hash)
-        )
-    """)
+    try:
+        cursor = conn.cursor()
 
-    conn.commit()
-    cursor.close()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                month VARCHAR(20),
+                day INT,
+                time VARCHAR(20),
+                message TEXT,
+                ip VARCHAR(45),
+                log_hash CHAR(64),
+                UNIQUE KEY unique_log_hash (log_hash)
+            )
+        """)
+
+        conn.commit()
+        cursor.close()
+
+    except Exception:
+        logger.exception("Erreur lors de la création de la table MySQL")
+        raise
 
 
 def save_rows(conn, entries):
-    cursor = conn.cursor()
-    inserted = 0
-    batch_size = 500
+    cursor = None
 
-    for i in range(0, len(entries), batch_size):
-        batch = []
+    try:
+        cursor = conn.cursor()
+        inserted = 0
+        batch_size = 500
 
-        for e in entries[i:i + batch_size]:
-            values = (
-                e["month"],
-                e["day"],
-                e["time"],
-                e["message"],
-                e["ip"]
+        for i in range(0, len(entries), batch_size):
+            batch = []
+
+            for e in entries[i:i + batch_size]:
+                values = (
+                    e["month"],
+                    e["day"],
+                    e["time"],
+                    e["message"],
+                    e["ip"]
+                )
+
+                content = "|".join(
+                    str(value) if value is not None else ""
+                    for value in values
+                )
+
+                log_hash = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
+
+                batch.append(values + (log_hash,))
+
+            cursor.executemany(
+                """
+                INSERT IGNORE INTO logs
+                (month, day, time, message, ip, log_hash)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                batch
             )
 
-            content = "|".join(
-                str(value) if value is not None else ""
-                for value in values
-            )
+            inserted += cursor.rowcount
+            conn.commit()
 
-            log_hash = hashlib.sha256(
-                content.encode("utf-8")
-            ).hexdigest()
+        cursor.close()
+        return inserted
 
-            batch.append(values + (log_hash,))
+    except Exception:
+        logger.exception("Erreur lors de l'insertion des logs dans MySQL")
+        raise
 
-        cursor.executemany(
-            """
-            INSERT IGNORE INTO logs
-            (month, day, time, message, ip, log_hash)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            batch
-        )
-
-        inserted += cursor.rowcount
-        conn.commit()
-
-    cursor.close()
-    return inserted
+    finally:
+        if cursor is not None:
+            cursor.close()
 
 
 def top_ips(conn, n=10):
-    cursor = conn.cursor()
+    cursor = None
 
-    cursor.execute(
-        """
-        SELECT ip, COUNT(*)
-        FROM logs
-        WHERE ip IS NOT NULL
-        GROUP BY ip
-        ORDER BY 2 DESC
-        LIMIT %s
-        """,
-        (n,)
-    )
+    try:
+        cursor = conn.cursor()
 
-    result = cursor.fetchall()
-    cursor.close()
+        cursor.execute(
+            """
+            SELECT ip, COUNT(*)
+            FROM logs
+            WHERE ip IS NOT NULL
+            GROUP BY ip
+            ORDER BY 2 DESC
+            LIMIT %s
+            """,
+            (n,)
+        )
 
-    return result
+        result = cursor.fetchall()
+        cursor.close()
+
+        return result
+
+    except Exception:
+        logger.exception("Erreur lors de la récupération des IP")
+        raise
+
+    finally:
+        if cursor is not None:
+            cursor.close()
 
 
 def load_rows(conn):
-    cursor = conn.cursor()
+    cursor = None
 
-    cursor.execute(
-        """
-        SELECT month, day, time, message, ip
-        FROM logs
-        ORDER BY id
-        """
-    )
+    try:
+        cursor = conn.cursor()
 
-    result = cursor.fetchall()
-    cursor.close()
+        cursor.execute(
+            """
+            SELECT month, day, time, message, ip
+            FROM logs
+            ORDER BY id
+            """
+        )
 
-    return result
+        result = cursor.fetchall()
+        cursor.close()
+
+        return result
+
+    except Exception:
+        logger.exception("Erreur lors de la récupération des logs MySQL")
+        raise
+
+    finally:
+        if cursor is not None:
+            cursor.close()
 
 
 # ---------- Statistiques ----------
@@ -153,29 +227,34 @@ def classify(msg):
 
 
 def compute_stats(rows):
-    s = {
-        "types": Counter(),
-        "hours": Counter(),
-        "days": Counter(),
-        "users": Counter(),
-        "ips": Counter(),
-    }
+    try:
+        s = {
+            "types": Counter(),
+            "hours": Counter(),
+            "days": Counter(),
+            "users": Counter(),
+            "ips": Counter(),
+        }
 
-    for month, day, t, msg, ip in rows:
-        kind = classify(msg)
-        s["types"][kind] += 1
-        s["hours"][int(t[:2])] += 1
-        s["days"][f"{month} {day:02d}"] += 1
+        for month, day, t, msg, ip in rows:
+            kind = classify(msg)
+            s["types"][kind] += 1
+            s["hours"][int(t[:2])] += 1
+            s["days"][f"{month} {day:02d}"] += 1
 
-        if ip:
-            s["ips"][ip] += 1
+            if ip:
+                s["ips"][ip] += 1
 
-        if kind in ("Failed password", "Invalid user"):
-            m = USER_RE.search(msg)
-            if m:
-                s["users"][m.group(1)] += 1
+            if kind in ("Failed password", "Invalid user"):
+                m = USER_RE.search(msg)
+                if m:
+                    s["users"][m.group(1)] += 1
 
-    return s
+        return s
+
+    except Exception:
+        logger.exception("Erreur lors du calcul des statistiques")
+        raise
 
 
 def countries_stats(top, limit=8):
@@ -206,11 +285,30 @@ def countries_stats(top, limit=8):
 
             else:
                 countries["Inconnu"] += count
+
+                logger.error(
+                    "Géolocalisation indisponible pour l'IP %s : %s",
+                    ip,
+                    info.get("message", "Erreur API")
+                )
+
                 print(f"  {ip} ({count}) : localisation indisponible")
 
         except requests.RequestException:
+            logger.exception(
+                "Erreur de connexion à l'API de géolocalisation pour l'IP %s",
+                ip
+            )
+
             countries["Inconnu"] += count
             print(f"  {ip} ({count}) : erreur de connexion")
+
+        except Exception:
+            logger.exception(
+                "Erreur inattendue pendant la géolocalisation de l'IP %s",
+                ip
+            )
+            raise
 
     return countries
 
@@ -356,6 +454,8 @@ def show_dashboard(rows, stats, top, countries):
 # ---------- Programme principal ----------
 
 def main():
+
+    # Lecture et extraction des logs
     rows = raw.toRows('./data')
 
     entries = []
@@ -366,9 +466,14 @@ def main():
         if entry:
             entries.append(entry)
 
-    conn = mysql.connector.connect(**DB_CONFIG)
+    # Connexion à MySQL
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        print("Connexion à MySQL réussie !")
 
-    print("Connexion à MySQL réussie !")
+    except Exception:
+        logger.exception("Erreur lors de la connexion à MySQL")
+        raise
 
     try:
         create_table(conn)
@@ -381,16 +486,28 @@ def main():
         data = load_rows(conn)
 
     finally:
-        conn.close()
-        print("Connexion MySQL fermée.")
+        try:
+            conn.close()
+            print("Connexion MySQL fermée.")
+        except Exception:
+            logger.exception("Erreur lors de la fermeture de la connexion MySQL")
+            raise
 
+    # Calcul des statistiques
     stats = compute_stats(data)
 
     print("Types d'événements :", dict(stats["types"]))
 
+    # Géolocalisation
     countries = countries_stats(top)
 
-    show_dashboard(data, stats, top, countries)
+    # Affichage du dashboard
+    try:
+        show_dashboard(data, stats, top, countries)
+
+    except Exception:
+        logger.exception("Erreur lors de l'affichage du dashboard")
+        raise
 
 
 if __name__ == "__main__":
