@@ -15,3 +15,6 @@ __pycache__/
 .env
 *.env
 logs.db
+
+# Logs générés par l'application
+app_logs/
